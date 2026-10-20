@@ -291,5 +291,14 @@
     <a href="#stats" data-page="stats" class="nav-link"><span>↗</span><small>Stats</small></a>
     <a href="#settings" data-page="settings" class="nav-link" aria-label="Einstellungen"><span>⚙</span><small>Einst.</small></a>
   </nav>
+  
+  <script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("sw.js");
+    });
+  }
+</script>
+  
 </body>
 </html>
