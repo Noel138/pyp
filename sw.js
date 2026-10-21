@@ -1,9 +1,11 @@
-const CACHE_NAME = "pyp-app-v1";
+const CACHE_NAME = "pyp-app-v4";
 const APP_FILES = [
   "./",
   "./index.html",
   "./style.css",
   "./script.js",
+  "./cloud.js",
+  "./firebase-config.js",
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png"
@@ -33,4 +35,15 @@ self.addEventListener("fetch", event => {
   }
 
   event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request)));
+});
+
+self.addEventListener("notificationclick", event => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clients => {
+      const app = clients.find(client => new URL(client.url).origin === self.location.origin);
+      if (app) return app.focus();
+      return self.clients.openWindow("./#training");
+    })
+  );
 });

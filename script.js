@@ -97,12 +97,16 @@ let timerInterval = null;
 let timerRemaining = 90;
 let timerEndAt = null;
 let audioContext = null;
+let liveWorkout = null;
+let liveWorkoutInterval = null;
+let screenWakeLock = null;
 let calendarCursor = new Date();
 let selectedCalendarDate = today();
 
-function saveState() {
+function saveState(syncCloud = true) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    if (syncCloud) window.dispatchEvent(new CustomEvent("pyp:local-save", { detail: { state } }));
     return true;
   } catch (error) {
     console.error("Speichern fehlgeschlagen:", error);
@@ -239,15 +243,18 @@ function renderWorkouts() {
     if (w.weight !== "" && w.weight != null && Number(w.weight) > 0) detail.push(`${esc(w.weight)} kg`);
     if (w.sets) detail.push(`${esc(w.sets)} Sätze`);
     if (w.reps) detail.push(`${esc(w.reps)} Wdh.`);
+    if (Number(w.holdSeconds) > 0) detail.push(`${esc(w.holdSeconds)} Sek. Halten`);
     if (w.intensity) detail.push(esc(w.intensity));
+    const duration = Number(w.minutes) > 0 ? `${Number(w.minutes)} Min.` : "";
     return `<div class="list-item">
       <div class="list-item-main"><strong>${esc(w.exercise || "Training")}</strong>
-      <small>${dateLabel(w.date)} · ${Number(w.minutes) || 0} Min. ${detail.length ? "· " + detail.join(" · ") : ""}</small></div>
+      <small>${dateLabel(w.date)}${duration ? ` · ${duration}` : ""} ${detail.length ? "· " + detail.join(" · ") : ""}</small></div>
       <button class="icon-button delete-workout" data-id="${esc(w.id)}" aria-label="Training löschen">×</button>
     </div>`;
   }).join("") : emptyMessage("Noch keine Trainingseinheiten gespeichert.");
 
-  $("dash-workouts").textContent = state.workouts.length + state.runs.length;
+  const sessions = new Set(state.workouts.map(workout => workout.sessionId || workout.id));
+  $("dash-workouts").textContent = sessions.size + state.runs.length;
   $("stat-minutes").textContent = total.toLocaleString("de-DE");
 }
 
@@ -273,13 +280,22 @@ function renderRunning() {
 }
 
 function renderPlans() {
-  $("plan-list").innerHTML = state.plans.length ? state.plans.map(plan => `
+  const strengthPlans = state.plans.filter(plan => plan.type !== "mobility");
+  const mobilityPlans = state.plans.filter(plan => plan.type === "mobility");
+  $("plan-list").innerHTML = strengthPlans.length ? strengthPlans.map(plan => `
     <div class="list-item">
       <div class="list-item-main"><strong>${esc(plan.name)}</strong>
       <small>${(plan.exercises || []).map(esc).join(" · ") || "Keine Übungen eingetragen"}</small></div>
-      <button class="button button-quiet start-plan" data-id="${esc(plan.id)}" type="button">Starten</button>
+      <button class="button button-quiet start-plan" data-id="${esc(plan.id)}" type="button">Live starten</button>
       <button class="icon-button delete-plan" data-id="${esc(plan.id)}" aria-label="Plan löschen">×</button>
     </div>`).join("") : emptyMessage("Erstelle einen Trainingsplan, um ihn hier zu sehen.");
+  $("mobility-plan-list").innerHTML = mobilityPlans.length ? mobilityPlans.map(plan => `
+    <div class="list-item">
+      <div class="list-item-main"><strong>${esc(plan.name)}</strong>
+      <small>${(plan.exercises || []).map(esc).join(" · ") || "Keine Übungen eingetragen"}</small></div>
+      <button class="button button-quiet start-plan" data-id="${esc(plan.id)}" type="button">Mobilität starten</button>
+      <button class="icon-button delete-plan" data-id="${esc(plan.id)}" aria-label="Mobilitätsplan löschen">×</button>
+    </div>`).join("") : emptyMessage("Erstelle einen Mobilitätsplan, um ihn hier zu sehen.");
 }
 
 function renderProjects() {
@@ -449,6 +465,78 @@ function renderStats() {
       state.runs.filter(run => run.date === d.date).reduce((sum, run) => sum + (Number(run.minutes) || 0), 0)
   }));
   $("workout-chart").innerHTML = chartHTML(rows, "min", "Noch keine Trainingsdaten für diese Woche.");
+  renderTrainingTrends();
+}
+
+function trendChartHTML(rows, formatValue, lowerIsBetter = false) {
+  if (!rows.length) return emptyMessage("Protokolliere weitere Einheiten, um den Verlauf zu sehen.");
+  const width = 640, height = 240;
+  const padding = { top: 20, right: 24, bottom: 42, left: 58 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const values = rows.map(row => row.value);
+  const dataMin = Math.min(...values), dataMax = Math.max(...values);
+  const range = dataMax - dataMin || Math.max(1, dataMax * 0.1);
+  const min = Math.max(0, dataMin - range * 0.15);
+  const max = dataMax + range * 0.15 || 1;
+  const x = index => padding.left + (rows.length === 1 ? plotWidth / 2 : index / (rows.length - 1) * plotWidth);
+  const y = value => padding.top + (max - value) / (max - min) * plotHeight;
+  const points = rows.map((row, index) => `${x(index)},${y(row.value)}`).join(" ");
+  const grid = Array.from({ length: 4 }, (_, index) => {
+    const value = min + (max - min) * index / 3;
+    const position = y(value);
+    return `<line class="trend-grid-line" x1="${padding.left}" y1="${position}" x2="${width - padding.right}" y2="${position}"></line>
+      <text class="trend-axis-label" x="${padding.left - 8}" y="${position + 4}" text-anchor="end">${esc(formatValue(value))}</text>`;
+  }).join("");
+  const labels = rows.map((row, index) => {
+    const label = new Date(`${row.date}T12:00:00`).toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+    const showLabel = rows.length <= 8 || index === 0 || index === rows.length - 1 ||
+      index % Math.ceil(rows.length / 6) === 0;
+    return `${showLabel ? `<text class="trend-axis-label" x="${x(index)}" y="${height - 12}" text-anchor="middle">${label}</text>` : ""}
+      <circle class="trend-point" cx="${x(index)}" cy="${y(row.value)}" r="5"><title>${dateLabel(row.date)}: ${esc(formatValue(row.value))}</title></circle>`;
+  }).join("");
+  const difference = rows[rows.length - 1].value - rows[0].value;
+  const direction = Math.abs(difference) < 0.0001 ? "unverändert"
+    : lowerIsBetter
+      ? difference < 0 ? "verbessert (schneller)" : "verschlechtert (langsamer)"
+      : difference > 0 ? "gestiegen" : "gesunken";
+  return `<p class="trend-direction">Zuletzt ${direction}: ${esc(formatValue(rows[rows.length - 1].value))} (${rows.length} Einheiten)</p>
+    <svg class="trend-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Verlauf über ${rows.length} Trainingseinheiten">
+      ${grid}<polyline class="trend-line" points="${points}"></polyline>${labels}
+    </svg>
+    <ol class="trend-data">${rows.map(row => `<li>${dateLabel(row.date)}: ${esc(formatValue(row.value))}</li>`).join("")}</ol>`;
+}
+
+function renderTrainingTrends() {
+  const exerciseSelect = $("weight-trend-exercise");
+  const exercises = [...new Set(state.workouts
+    .filter(workout => workout.exercise && Number(workout.weight) > 0)
+    .map(workout => workout.exercise))].sort((a, b) => a.localeCompare(b, "de"));
+  const selectedExercise = exercises.includes(exerciseSelect.value) ? exerciseSelect.value : exercises[0] || "";
+  exerciseSelect.innerHTML = exercises.map(exercise =>
+    `<option value="${esc(exercise)}">${esc(exercise)}</option>`
+  ).join("");
+  exerciseSelect.value = selectedExercise;
+  const weightRows = state.workouts
+    .filter(workout => workout.exercise === selectedExercise && Number(workout.weight) > 0 && validISODate(workout.date))
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(workout => ({ date: workout.date, value: Number(workout.weight) }));
+  $("weight-trend").innerHTML = weightRows.length
+    ? trendChartHTML(weightRows, value => `${value.toLocaleString("de-DE", { maximumFractionDigits: 1 })} kg`)
+    : emptyMessage(exercises.length ? "Noch keine Einträge für diese Übung." : "Protokolliere Trainingseinheiten mit Gewicht, um den Verlauf zu sehen.");
+
+  const metric = $("run-trend-metric").value;
+  const runRows = state.runs
+    .filter(run => validISODate(run.date) && Number(run.distance) > 0 && Number(run.minutes) > 0)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(run => ({ date: run.date, value: metric === "distance"
+      ? Number(run.distance)
+      : Number(run.minutes) / Number(run.distance) }));
+  $("run-trend").innerHTML = runRows.length
+    ? trendChartHTML(runRows, value => metric === "distance"
+      ? `${value.toLocaleString("de-DE", { maximumFractionDigits: 1 })} km`
+      : paceLabel(value, 1), metric === "pace")
+    : emptyMessage("Protokolliere Läufe mit Strecke und Dauer, um den Verlauf zu sehen.");
 }
 
 function renderAll() {
@@ -635,12 +723,7 @@ document.addEventListener("click", event => {
 
   if (button.matches(".start-plan")) {
     const plan = state.plans.find(p => p.id === button.dataset.id);
-    if (plan) {
-      $("exercise").value = plan.exercises[0] || plan.name;
-      $("page-title").textContent = "Training";
-      $("workout-form").scrollIntoView({ behavior: "smooth", block: "center" });
-      $("exercise").focus();
-    }
+    if (plan) startLiveWorkout(plan);
   }
 
   if (button.matches(".delete-project")) {
@@ -702,6 +785,19 @@ $("plan-form").addEventListener("submit", event => {
   const exercises = escapeNewlines($("plan-exercises").value);
   state.plans.push({ id: uid(), name, exercises });
   $("plan-form").reset();
+  saveState(); renderAll();
+});
+
+$("mobility-plan-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const name = $("mobility-plan-name").value.trim();
+  const exercises = escapeNewlines($("mobility-plan-exercises").value);
+  if (!name || !exercises.length) {
+    alert("Bitte gib einen Namen und mindestens eine Mobilitätsübung ein.");
+    return;
+  }
+  state.plans.push({ id: uid(), name, exercises, type: "mobility" });
+  $("mobility-plan-form").reset();
   saveState(); renderAll();
 });
 
@@ -841,7 +937,7 @@ $("backup-import").addEventListener("change", async event => {
   event.target.value = "";
 });
 
-function playTone() {
+function playTone(frequency = 660, volume = 0.035, duration = 0.15, type = "sine") {
   // Sound erst nach einer bewussten Nutzeraktion; bei nicht unterstützten Browsern still bleiben.
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -850,18 +946,357 @@ function playTone() {
     if (audioContext.state === "suspended") audioContext.resume();
     const oscillator = audioContext.createOscillator();
     const gain = audioContext.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.value = 660;
-    gain.gain.setValueAtTime(0.035, audioContext.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.15);
+    oscillator.type = type;
+    oscillator.frequency.value = frequency;
+    gain.gain.setValueAtTime(volume, audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + duration);
     oscillator.connect(gain);
     gain.connect(audioContext.destination);
     oscillator.start();
-    oscillator.stop(audioContext.currentTime + 0.15);
+    oscillator.stop(audioContext.currentTime + duration);
   } catch (error) {
     console.info("Sound ist in diesem Browser nicht verfügbar.");
   }
 }
+
+function playRestFinishedSound() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    if (!audioContext) audioContext = new AudioCtx();
+    if (audioContext.state === "suspended") audioContext.resume();
+
+    const notes = [196, 246.94, 293.66, 392];
+    const startAt = audioContext.currentTime;
+    notes.forEach((frequency, index) => {
+      const start = startAt + index * 0.19;
+      const end = start + (index === notes.length - 1 ? 0.72 : 0.48);
+      const oscillator = audioContext.createOscillator();
+      const overtone = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      const overtoneGain = audioContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(frequency, start);
+      overtone.type = "sine";
+      overtone.frequency.setValueAtTime(frequency * 2, start);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.12, start + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.0001, end);
+      overtoneGain.gain.setValueAtTime(0.0001, start);
+      overtoneGain.gain.exponentialRampToValueAtTime(0.012, start + 0.05);
+      overtoneGain.gain.exponentialRampToValueAtTime(0.0001, end);
+      oscillator.connect(gain);
+      overtone.connect(overtoneGain);
+      gain.connect(audioContext.destination);
+      overtoneGain.connect(audioContext.destination);
+      oscillator.start(start);
+      overtone.start(start);
+      oscillator.stop(end);
+      overtone.stop(end);
+    });
+  } catch (error) {
+    console.info("Pausen-Sound ist in diesem Browser nicht verfügbar.");
+  }
+}
+
+function playStartSound() {
+  playTone(523);
+  window.setTimeout(() => playTone(784), 120);
+}
+
+function startLiveWorkout(plan) {
+  stopTimer();
+  const restSeconds = Math.max(1, Math.min(3600, Number($("timer-seconds").value) || 90));
+  const exercises = Array.isArray(plan.exercises) ? plan.exercises.filter(Boolean) : [];
+  const isMobility = plan.type === "mobility";
+  liveWorkout = {
+    name: plan.name,
+    type: isMobility ? "mobility" : "strength",
+    exercises: exercises.length ? [...exercises] : [plan.name],
+    exerciseIndex: 0,
+    completedSets: 0,
+    completedReps: 0,
+    completedSetsByExercise: [],
+    sets: Math.max(1, Math.min(100, Number($("sets").value) || 3)),
+    reps: Math.max(1, Math.min(1000, Number($("reps").value) || 10)),
+    exerciseWeights: isMobility ? [] : (exercises.length ? exercises : [plan.name]).map(() => $("weight").value),
+    exerciseHoldSeconds: isMobility ? exercises.map(() => 0) : [],
+    restSeconds,
+    startedAt: Date.now(),
+    restEndsAt: null,
+    phase: "ready",
+    complete: false
+  };
+
+  $("live-plan-name").textContent = plan.name;
+  $("live-workout").classList.toggle("mobility-workout", isMobility);
+  $("live-weight").value = liveWorkout.exerciseWeights[0] || "";
+  $("live-sets").value = liveWorkout.sets;
+  $("live-reps").value = liveWorkout.reps;
+  $("live-rest").value = liveWorkout.restSeconds;
+  $("live-hold").value = "0";
+  $("live-hold").closest(".field").hidden = !isMobility;
+  $("live-workout").hidden = false;
+  $("live-workout").setAttribute("aria-hidden", "false");
+  document.body.classList.add("workout-in-progress");
+  renderLiveWorkout();
+  $("live-end").focus();
+  playStartSound();
+  requestScreenWakeLock();
+  requestWorkoutNotifications();
+}
+
+function renderLiveWorkout() {
+  if (!liveWorkout) return;
+  const workout = liveWorkout;
+  const isResting = workout.phase === "rest";
+  const isHolding = workout.phase === "hold";
+  const isMobility = workout.type === "mobility";
+  $("live-exercise-count").textContent = workout.complete
+    ? "Alle Übungen abgeschlossen"
+    : `Übung ${workout.exerciseIndex + 1} von ${workout.exercises.length}`;
+  $("live-exercise-name").textContent = workout.complete
+    ? "Stark gemacht!"
+    : workout.exercises[workout.exerciseIndex];
+  $("live-set-progress").textContent = workout.complete
+    ? `${workout.completedSetsByExercise.reduce((sum, sets) => sum + sets, 0)} Sätze abgeschlossen`
+    : isMobility
+      ? `Satz ${Math.min(workout.completedSets + 1, workout.sets)} von ${workout.sets} · Wiederholung ${Math.min(workout.completedReps + 1, workout.reps)} von ${workout.reps}`
+      : `Satz ${Math.min(workout.completedSets + 1, workout.sets)} von ${workout.sets} · ${workout.reps} Wiederholungen`;
+  $("live-timer-display").textContent = workout.complete
+    ? "Fertig"
+    : isResting || isHolding
+      ? formatTimer(Math.max(0, Math.ceil((workout.restEndsAt - Date.now()) / 1000)))
+      : "Bereit";
+  $("live-status").textContent = workout.complete
+    ? "Dein Training ist abgeschlossen. Beende die Einheit, um sie zu speichern."
+    : isResting ? "Pause läuft …"
+      : isHolding ? "Halte die Position …"
+        : isMobility ? "Bereit für die nächste Wiederholung."
+          : "Bereit für deinen nächsten Satz.";
+  $("live-set-done").textContent = workout.complete ? "Einheit speichern & beenden"
+    : isMobility ? isHolding ? "Haltezeit läuft …"
+      : workout.exerciseHoldSeconds[workout.exerciseIndex] > 0 ? "Haltezeit starten" : "Wiederholung abschließen"
+      : "Satz abschließen";
+  $("live-set-done").disabled = isResting || isHolding;
+  $("live-skip-rest").textContent = isHolding ? "Halten überspringen" : "Pause überspringen";
+  $("live-skip-rest").hidden = !isResting && !isHolding;
+}
+
+function finishLiveRest() {
+  if (!liveWorkout) return;
+  if (liveWorkoutInterval) clearInterval(liveWorkoutInterval);
+  liveWorkoutInterval = null;
+  liveWorkout.restEndsAt = null;
+  liveWorkout.phase = "ready";
+  if (liveWorkout.completedSets >= liveWorkout.sets) {
+    liveWorkout.completedSetsByExercise[liveWorkout.exerciseIndex] = liveWorkout.completedSets;
+    if (liveWorkout.exerciseIndex + 1 >= liveWorkout.exercises.length) {
+      liveWorkout.complete = true;
+    } else {
+      liveWorkout.exerciseIndex++;
+      liveWorkout.completedSets = 0;
+      liveWorkout.completedReps = 0;
+      $("live-weight").value = liveWorkout.exerciseWeights[liveWorkout.exerciseIndex] || "";
+      $("live-hold").value = liveWorkout.exerciseHoldSeconds[liveWorkout.exerciseIndex] || 0;
+    }
+  }
+  renderLiveWorkout();
+  notifyWorkoutRestFinished();
+  if (document.visibilityState === "visible") requestScreenWakeLock();
+}
+
+function requestScreenWakeLock() {
+  if (!("wakeLock" in navigator)) return;
+  navigator.wakeLock.request("screen").then(lock => {
+    screenWakeLock = lock;
+    lock.addEventListener("release", () => {
+      if (screenWakeLock === lock) screenWakeLock = null;
+      if (liveWorkout && liveWorkout.phase !== "rest" && document.visibilityState === "visible") requestScreenWakeLock();
+    }, { once: true });
+  }).catch(error => {
+    console.info("Bildschirm kann während des Trainings nicht wach gehalten werden:", error);
+  });
+}
+
+async function requestWorkoutNotifications() {
+  if (!("Notification" in window) || Notification.permission !== "default") return;
+  try {
+    await Notification.requestPermission();
+  } catch (error) {
+    console.info("Mitteilungen sind in diesem Browser nicht verfügbar:", error);
+  }
+}
+
+function notifyWorkoutRestFinished() {
+  $("live-status").textContent = "Pause vorbei. Bereit für den nächsten Satz.";
+  playRestFinishedSound();
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const options = {
+    body: "Pause vorbei. Du kannst mit deinem nächsten Satz weitermachen.",
+    icon: "./icon-192.png",
+    badge: "./icon-192.png",
+    tag: "pyp-workout-rest",
+    renotify: true,
+    requireInteraction: true,
+    vibrate: [200, 100, 200]
+  };
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.getRegistration().then(registration => {
+      if (registration) return registration.showNotification("Pause vorbei", options);
+      return new Notification("Pause vorbei", options);
+    }).catch(error => console.info("Workout-Mitteilung konnte nicht angezeigt werden:", error));
+  } else {
+    new Notification("Pause vorbei", options);
+  }
+}
+
+function releaseScreenWakeLock() {
+  const wakeLock = screenWakeLock;
+  screenWakeLock = null;
+  if (wakeLock) wakeLock.release();
+}
+
+function endLiveWorkout() {
+  if (!liveWorkout) return;
+  const setsByExercise = [...liveWorkout.completedSetsByExercise];
+  if (!liveWorkout.complete) setsByExercise[liveWorkout.exerciseIndex] = liveWorkout.completedSets;
+  const totalSets = setsByExercise.reduce((sum, sets) => sum + (Number(sets) || 0), 0);
+  if (!liveWorkout.complete && !confirm(totalSets
+    ? "Training beenden und die abgeschlossenen Sätze speichern?"
+    : "Training ohne gespeicherte Sätze beenden?")) return;
+
+  if (totalSets > 0) {
+    const minutes = Math.max(1, Math.round((Date.now() - liveWorkout.startedAt) / 60000));
+    const sessionId = uid();
+    let minutesAssigned = false;
+    liveWorkout.exercises.forEach((exercise, index) => {
+      const sets = Number(setsByExercise[index]) || 0;
+      if (!sets) return;
+      const weight = liveWorkout.exerciseWeights[index] || "";
+      state.workouts.push({
+        id: uid(), sessionId, exercise, type: liveWorkout.type, minutes: minutesAssigned ? 0 : minutes,
+        intensity: $("intensity").value, weight: weight === "" ? "" : Number(weight),
+        sets, reps: liveWorkout.reps, holdSeconds: liveWorkout.exerciseHoldSeconds[index] || 0, date: today()
+      });
+      minutesAssigned = true;
+    });
+    saveState();
+    renderAll();
+  }
+
+  if (liveWorkoutInterval) clearInterval(liveWorkoutInterval);
+  liveWorkoutInterval = null;
+  liveWorkout = null;
+  releaseScreenWakeLock();
+  $("live-workout").hidden = true;
+  $("live-workout").setAttribute("aria-hidden", "true");
+  document.body.classList.remove("workout-in-progress");
+  $("live-end").blur();
+  if (totalSets > 0) playTone(880);
+}
+
+function completeLiveSet() {
+  if (!liveWorkout || liveWorkout.restEndsAt !== null || liveWorkout.complete) return;
+  liveWorkout.completedSets++;
+  startLiveTimer("rest", liveWorkout.restSeconds);
+}
+
+function completeMobilityRep() {
+  if (!liveWorkout || liveWorkout.type !== "mobility" || liveWorkout.complete) return;
+  if (liveWorkoutInterval) clearInterval(liveWorkoutInterval);
+  liveWorkoutInterval = null;
+  liveWorkout.phase = "ready";
+  liveWorkout.restEndsAt = null;
+  liveWorkout.completedReps++;
+  if (liveWorkout.completedReps >= liveWorkout.reps) {
+    liveWorkout.completedReps = 0;
+    liveWorkout.completedSets++;
+    if (liveWorkout.completedSets >= liveWorkout.sets) {
+      liveWorkout.completedSetsByExercise[liveWorkout.exerciseIndex] = liveWorkout.completedSets;
+      if (liveWorkout.exerciseIndex + 1 >= liveWorkout.exercises.length) {
+        liveWorkout.complete = true;
+        renderLiveWorkout();
+        playTone(784);
+        return;
+      }
+    }
+    startLiveTimer("rest", liveWorkout.restSeconds);
+    return;
+  }
+  renderLiveWorkout();
+}
+
+function startLiveTimer(phase, seconds) {
+  if (!liveWorkout) return;
+  liveWorkout.phase = phase;
+  liveWorkout.restEndsAt = Date.now() + seconds * 1000;
+  if (phase === "rest") releaseScreenWakeLock();
+  renderLiveWorkout();
+  liveWorkoutInterval = window.setInterval(() => {
+    if (!liveWorkout) return;
+    if (Date.now() >= liveWorkout.restEndsAt) {
+      if (liveWorkout.phase === "rest") finishLiveRest();
+      else completeMobilityRep();
+    }
+    else renderLiveWorkout();
+  }, 250);
+}
+
+$("live-end").addEventListener("click", endLiveWorkout);
+$("live-set-done").addEventListener("click", () => {
+  if (liveWorkout && liveWorkout.complete) endLiveWorkout();
+  else if (liveWorkout?.type === "mobility") {
+    if (liveWorkout.phase === "hold") return;
+    const holdSeconds = liveWorkout.exerciseHoldSeconds[liveWorkout.exerciseIndex] || 0;
+    if (holdSeconds > 0) startLiveTimer("hold", holdSeconds);
+    else completeMobilityRep();
+  } else completeLiveSet();
+});
+$("live-skip-rest").addEventListener("click", () => {
+  if (liveWorkout?.phase === "hold") completeMobilityRep();
+  else finishLiveRest();
+});
+$("live-weight").addEventListener("input", () => {
+  if (liveWorkout) liveWorkout.exerciseWeights[liveWorkout.exerciseIndex] = $("live-weight").value;
+});
+$("live-sets").addEventListener("change", () => {
+  if (!liveWorkout) return;
+  const minimum = liveWorkout.completedSets + (liveWorkout.restEndsAt === null ? 1 : 0);
+  liveWorkout.sets = Math.max(minimum, Math.min(100, Number($("live-sets").value) || minimum));
+  $("live-sets").value = liveWorkout.sets;
+  renderLiveWorkout();
+});
+$("live-reps").addEventListener("change", () => {
+  if (!liveWorkout) return;
+  liveWorkout.reps = Math.max(1, Math.min(1000, Number($("live-reps").value) || 1));
+  $("live-reps").value = liveWorkout.reps;
+  renderLiveWorkout();
+});
+$("live-rest").addEventListener("change", () => {
+  if (!liveWorkout) return;
+  liveWorkout.restSeconds = Math.max(1, Math.min(3600, Number($("live-rest").value) || 90));
+  $("live-rest").value = liveWorkout.restSeconds;
+  $("timer-seconds").value = liveWorkout.restSeconds;
+  if (liveWorkout.restEndsAt !== null) {
+    liveWorkout.restEndsAt = Date.now() + liveWorkout.restSeconds * 1000;
+  }
+  renderLiveWorkout();
+});
+$("live-hold").addEventListener("change", () => {
+  if (!liveWorkout || liveWorkout.type !== "mobility") return;
+  const holdSeconds = Math.max(0, Math.min(3600, Number($("live-hold").value) || 0));
+  liveWorkout.exerciseHoldSeconds[liveWorkout.exerciseIndex] = holdSeconds;
+  $("live-hold").value = holdSeconds;
+});
+$("weight-trend-exercise").addEventListener("change", renderTrainingTrends);
+$("run-trend-metric").addEventListener("change", renderTrainingTrends);
+document.addEventListener("visibilitychange", () => {
+  if (liveWorkout && document.visibilityState === "visible") {
+    if (liveWorkout.phase === "rest" && Date.now() >= liveWorkout.restEndsAt) finishLiveRest();
+    else if (liveWorkout.phase !== "rest" && !screenWakeLock) requestScreenWakeLock();
+  }
+});
 
 function formatTimer(seconds) {
   const mins = Math.floor(Math.max(0, seconds) / 60);
@@ -903,7 +1338,7 @@ $("timer-start").addEventListener("click", () => {
       stopTimer();
       $("timer-start").textContent = "Erneut starten";
       $("timer-status").textContent = "Pause vorbei. Bereit für den nächsten Satz.";
-      playTone();
+      playRestFinishedSound();
     }
   }, 250);
 });
@@ -924,7 +1359,18 @@ $("timer-seconds").addEventListener("change", () => {
   updateTimerDisplay();
 });
 
-window.addEventListener("beforeunload", () => stopTimer());
+window.addEventListener("beforeunload", () => {
+  stopTimer();
+  if (liveWorkoutInterval) clearInterval(liveWorkoutInterval);
+});
+window.addEventListener("pyp:cloud-state", event => {
+  state = normalize(event.detail.state);
+  if (saveState(false)) renderAll();
+});
+window.addEventListener("pyp:cloud-reset", () => {
+  state = initialState();
+  if (saveState(false)) renderAll();
+});
 
 renderAll();
 updateTimerDisplay();

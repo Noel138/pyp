@@ -14,6 +14,8 @@
   <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="stylesheet" href="style.css">
   <script src="script.js" defer></script>
+  <script src="firebase-config.js" defer></script>
+  <script src="cloud.js" defer></script>
 </head>
 <body>
   <aside class="sidebar">
@@ -154,6 +156,16 @@
             <button class="button" type="submit">Plan speichern</button>
           </form>
           <div id="plan-list" class="item-list"></div>
+          <div class="mobility-plan-section">
+            <h3>Mobilitätsplan erstellen</h3>
+            <p class="muted">Ohne Gewichte, mit Wiederholungen und optionaler Haltezeit.</p>
+            <form id="mobility-plan-form" class="stack-form">
+              <label class="field">Name des Plans<input id="mobility-plan-name" required maxlength="100" placeholder="z. B. Morgenmobilität"></label>
+              <label class="field">Übungen (eine pro Zeile)<textarea id="mobility-plan-exercises" rows="4" placeholder="90/90 Hüftwechsel&#10;Cat-Cow&#10;Tiefe Hocke"></textarea></label>
+              <button class="button" type="submit">Mobilitätsplan speichern</button>
+            </form>
+            <div id="mobility-plan-list" class="item-list"></div>
+          </div>
         </article>
         <article class="panel">
           <h3>Training protokollieren</h3>
@@ -219,7 +231,7 @@
 
     <section class="page" id="page-screen-time">
       <div class="page-intro"><p class="eyebrow">USE TIME INTENTIONALLY</p><h2>Bildschirmzeit</h2><p>Beobachte deine Nutzung und erkenne langfristige Veränderungen.</p></div>
-      <div class="notice"><strong>Hinweis zum Import:</strong> PYP kann keine System-Bildschirmzeit direkt auslesen. Du kannst eine passende CSV-Datei importieren oder Tageswerte manuell eintragen. Die CSV muss mindestens ein Datum und eine Dauer enthalten.</div>
+      <div class="notice"><strong>Apple Bildschirmzeit:</strong> iOS stellt einer Web-App wie PYP keine Nutzungsdaten direkt bereit. Auf dem iPhone findest du den Tageswert unter „Einstellungen“ → „Bildschirmzeit“ → „Alle App- &amp; Websiteaktivitäten anzeigen“; trage ihn anschließend unten manuell ein. Alternativ kannst du eine CSV mit Datum und Dauer importieren.</div>
       <div class="content-grid">
         <article class="panel">
           <h3>Tageswert eintragen</h3>
@@ -252,12 +264,53 @@
         <article class="panel stat-card"><span class="muted">Habits erledigt</span><strong id="stat-habits">0</strong><small>heute abgeschlossen</small></article>
         <article class="panel stat-card"><span class="muted">Projektfortschritt</span><strong id="stat-projects">0%</strong><small>über alle Projekte</small></article>
       </div>
+      <article class="panel">
+        <div class="section-heading"><div><h3>Gewichtsverlauf</h3><p class="muted">Arbeitsgewicht pro Trainingseinheit.</p></div>
+          <label class="field trend-select">Übung<select id="weight-trend-exercise" aria-label="Übung für Gewichtsverlauf"></select></label>
+        </div>
+        <div id="weight-trend" class="trend-chart"></div>
+      </article>
+      <article class="panel">
+        <div class="section-heading"><div><h3>Laufentwicklung</h3><p class="muted">Strecke oder Tempo pro Laufeinheit.</p></div>
+          <label class="field trend-select">Wert<select id="run-trend-metric" aria-label="Wert für Laufentwicklung">
+            <option value="pace">Tempo (min/km)</option><option value="distance">Strecke (km)</option>
+          </select></label>
+        </div>
+        <div id="run-trend" class="trend-chart"></div>
+      </article>
       <article class="panel"><h3>Bildschirmzeit – letzte 7 Tage</h3><div id="stats-screen-chart" class="chart"></div></article>
       <article class="panel"><h3>Trainingsminuten – letzte 7 Tage</h3><div id="workout-chart" class="chart"></div></article>
     </section>
 
     <section class="page" id="page-settings">
-      <div class="page-intro"><p class="eyebrow">YOUR DATA, YOUR RULES</p><h2>Einstellungen & Backups</h2><p>Deine Daten werden lokal in diesem Browser gespeichert.</p></div>
+      <div class="page-intro"><p class="eyebrow">YOUR DATA, YOUR RULES</p><h2>Einstellungen & Backups</h2><p>Deine Daten bleiben lokal, bis du Firebase-Cloud-Synchronisierung einrichtest.</p></div>
+      <article class="panel">
+        <h3>Konto & Cloud-Synchronisierung</h3>
+        <p class="muted">Melde dich mit derselben E-Mail-Adresse auf deinen Geräten an, damit deine Daten synchronisiert werden. Dafür ist eine einmalige Firebase-Einrichtung auf einer HTTPS-Webseite nötig.</p>
+        <form id="account-form" class="stack-form">
+          <label class="field">E-Mail<input id="account-email" type="email" autocomplete="email" required></label>
+          <label class="field">Passwort<input id="account-password" type="password" autocomplete="current-password" minlength="8" required></label>
+          <div class="form-row">
+            <button class="button" type="submit" data-auth-action="login" disabled>Anmelden</button>
+            <button class="button button-quiet" type="submit" data-auth-action="signup" disabled>Konto erstellen</button>
+            <button class="button button-quiet" id="account-reset-password" type="button" disabled>Passwort zurücksetzen</button>
+            <button class="button button-quiet" id="account-logout" type="button" hidden>Abmelden</button>
+          </div>
+        </form>
+        <p id="account-status" class="muted" aria-live="polite">Cloud-Konto wird geprüft …</p>
+        <button class="button button-quiet" id="account-sync-retry" type="button" hidden>Synchronisierung erneut versuchen</button>
+        <details>
+          <summary>Firebase einmalig kostenlos einrichten</summary>
+          <ol class="help-list">
+            <li>Erstelle in der <a class="text-link" href="https://console.firebase.google.com/" target="_blank" rel="noopener noreferrer">Firebase Console</a> ein Projekt im kostenlosen Spark-Tarif und füge eine Web-App hinzu.</li>
+            <li>Aktiviere unter Authentication die E-Mail/Passwort-Anmeldung und erstelle eine Firestore-Datenbank.</li>
+            <li>Kopiere die Firebase-Web-App-Konfiguration in <code>firebase-config.js</code> und veröffentliche die Regeln aus <code>firestore.rules</code>.</li>
+            <li>Installiere Node.js und die kostenlose Firebase CLI mit <code>npm install -g firebase-tools</code>, melde dich mit <code>firebase login</code> an und wähle dein Projekt im PYP-Ordner mit <code>firebase use --add</code> aus.</li>
+            <li>Veröffentliche mit <code>firebase deploy --only hosting,firestore:rules</code>. Öffne anschließend die HTTPS-Seite auf dem iPhone in Safari oder auf Android in Chrome und füge sie zum Startbildschirm hinzu.</li>
+          </ol>
+          <p class="muted">Der Spark-Tarif hat Nutzungsgrenzen. Die Synchronisierung funktioniert erst nach dieser Einrichtung; behalte bis dahin deine Backups.</p>
+        </details>
+      </article>
       <article class="panel">
         <h3>Daten sichern</h3>
         <p class="muted">Exportiere eine Sicherung als JSON-Datei. Bewahre sie sicher auf. Für einen Gerätewechsel kannst du sie später importieren.</p>
@@ -270,8 +323,8 @@
       <article class="panel">
         <h3>Hinweise</h3>
         <ul class="help-list">
-          <li>PYP ist eine lokale Web-App; es wird kein Konto benötigt.</li>
-          <li>Deine Daten werden nicht automatisch zwischen PC und Handy synchronisiert.</li>
+          <li>PYP funktioniert ohne Konto lokal im Browser. Mit eingerichteter Firebase-Anmeldung kannst du deine Daten zusätzlich geräteübergreifend synchronisieren.</li>
+          <li>Ohne Firebase-Einrichtung werden Daten nicht automatisch zwischen PC und Handy synchronisiert.</li>
           <li>Ein Backup enthält auch deine persönlichen Einträge. Teile es nur, wenn du das möchtest.</li>
           <li>Ein importiertes Backup ersetzt die aktuell gespeicherten App-Daten.</li>
         </ul>
@@ -291,14 +344,34 @@
     <a href="#stats" data-page="stats" class="nav-link"><span>↗</span><small>Stats</small></a>
     <a href="#settings" data-page="settings" class="nav-link" aria-label="Einstellungen"><span>⚙</span><small>Einst.</small></a>
   </nav>
-  
-  <script>
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker.register("sw.js");
-    });
-  }
-</script>
-  
+
+  <section id="live-workout" class="live-workout" aria-label="Live-Training" aria-hidden="true" hidden>
+    <header class="live-workout-header">
+      <div>
+        <p class="eyebrow">LIVE-TRAINING</p>
+        <h1 id="live-plan-name">Training</h1>
+      </div>
+      <button id="live-end" class="button button-quiet" type="button">Training beenden</button>
+    </header>
+    <main class="live-workout-content">
+      <p id="live-exercise-count" class="muted"></p>
+      <h2 id="live-exercise-name"></h2>
+      <p id="live-set-progress" class="live-set-progress"></p>
+      <div id="live-timer-display" class="live-timer-display" aria-live="off">Bereit</div>
+      <p id="live-status" class="live-status" aria-live="polite">Bereit für deinen ersten Satz.</p>
+      <div class="live-workout-settings">
+        <label class="field strength-setting">Gewicht (kg)<input id="live-weight" type="number" min="0" max="1000" step="0.5" placeholder="z. B. 60"></label>
+        <label class="field">Sätze<input id="live-sets" type="number" min="1" max="100" value="3"></label>
+        <label class="field">Wiederholungen<input id="live-reps" type="number" min="1" max="1000" value="10"></label>
+        <label class="field">Pause (Sek.)<input id="live-rest" type="number" min="1" max="3600" value="90"></label>
+        <label class="field mobility-setting" hidden>Halten (Sek., 0 = aus)<input id="live-hold" type="number" min="0" max="3600" value="0"></label>
+      </div>
+      <div class="live-workout-actions">
+        <button id="live-set-done" class="button" type="button">Satz abschließen</button>
+        <button id="live-skip-rest" class="button button-quiet" type="button" hidden>Pause überspringen</button>
+      </div>
+      <p class="live-notification-note">Für eine Meldung mit Ton musst du Mitteilungen erlauben. Bei gesperrtem Bildschirm kann iOS/Android den Timer im Hintergrund anhalten.</p>
+    </main>
+  </section>
 </body>
 </html>
