@@ -249,6 +249,7 @@ function renderWorkouts() {
     return `<div class="list-item">
       <div class="list-item-main"><strong>${esc(w.exercise || "Training")}</strong>
       <small>${dateLabel(w.date)}${duration ? ` · ${duration}` : ""} ${detail.length ? "· " + detail.join(" · ") : ""}</small></div>
+      <button class="icon-button edit-workout" data-id="${esc(w.id)}" type="button">Bearbeiten</button>
       <button class="icon-button delete-workout" data-id="${esc(w.id)}" aria-label="Training löschen">×</button>
     </div>`;
   }).join("") : emptyMessage("Noch keine Trainingseinheiten gespeichert.");
@@ -279,20 +280,40 @@ function renderRunning() {
     </div>`).join("") : emptyMessage("Noch keine Läufe protokolliert.");
 }
 
+function planSettingsLabel(plan) {
+  const sets = Number(plan.sets) || (plan.type === "mobility" ? 2 : 3);
+  const reps = Number(plan.reps) || (plan.type === "mobility" ? 8 : 10);
+  const rest = Number(plan.restSeconds) || (plan.type === "mobility" ? 30 : 90);
+  const exercises = Array.isArray(plan.exercises) && plan.exercises.length ? plan.exercises : [plan.name];
+  if (plan.type === "mobility") {
+    const holds = exercises.map((exercise, index) =>
+      `${esc(exercise)} ${Math.max(0, Number(plan.exerciseHoldSeconds?.[index]) || 0)} Sek.`
+    ).join(" · ");
+    return `${sets} Sätze · ${reps} Wdh. · Pause ${rest} Sek. · Halten: ${holds}`;
+  }
+  const weights = exercises.map((exercise, index) => {
+    const weight = plan.exerciseWeights?.[index];
+    return Number(weight) > 0 ? `${esc(exercise)} ${esc(weight)} kg` : "";
+  }).filter(Boolean);
+  return `${sets} Sätze · ${reps} Wdh. · Pause ${rest} Sek.${weights.length ? ` · ${weights.join(" · ")}` : ""}`;
+}
+
 function renderPlans() {
   const strengthPlans = state.plans.filter(plan => plan.type !== "mobility");
   const mobilityPlans = state.plans.filter(plan => plan.type === "mobility");
   $("plan-list").innerHTML = strengthPlans.length ? strengthPlans.map(plan => `
     <div class="list-item">
       <div class="list-item-main"><strong>${esc(plan.name)}</strong>
-      <small>${(plan.exercises || []).map(esc).join(" · ") || "Keine Übungen eingetragen"}</small></div>
+      <small>${(plan.exercises || []).map(esc).join(" · ") || "Keine Übungen eingetragen"}</small>
+      <small>${planSettingsLabel(plan)}</small></div>
       <button class="button button-quiet start-plan" data-id="${esc(plan.id)}" type="button">Live starten</button>
       <button class="icon-button delete-plan" data-id="${esc(plan.id)}" aria-label="Plan löschen">×</button>
     </div>`).join("") : emptyMessage("Erstelle einen Trainingsplan, um ihn hier zu sehen.");
   $("mobility-plan-list").innerHTML = mobilityPlans.length ? mobilityPlans.map(plan => `
     <div class="list-item">
       <div class="list-item-main"><strong>${esc(plan.name)}</strong>
-      <small>${(plan.exercises || []).map(esc).join(" · ") || "Keine Übungen eingetragen"}</small></div>
+      <small>${(plan.exercises || []).map(esc).join(" · ") || "Keine Übungen eingetragen"}</small>
+      <small>${planSettingsLabel(plan)}</small></div>
       <button class="button button-quiet start-plan" data-id="${esc(plan.id)}" type="button">Mobilität starten</button>
       <button class="icon-button delete-plan" data-id="${esc(plan.id)}" aria-label="Mobilitätsplan löschen">×</button>
     </div>`).join("") : emptyMessage("Erstelle einen Mobilitätsplan, um ihn hier zu sehen.");
@@ -713,6 +734,11 @@ document.addEventListener("click", event => {
     }
   }
 
+  if (button.matches(".edit-workout")) {
+    const workout = state.workouts.find(item => item.id === button.dataset.id);
+    if (workout) openWorkoutEditor(workout);
+  }
+
   if (button.matches(".delete-plan")) {
     const plan = state.plans.find(p => p.id === button.dataset.id);
     if (plan && confirm(`Trainingsplan "${plan.name}" löschen?`)) {
@@ -784,7 +810,18 @@ $("plan-form").addEventListener("submit", event => {
   if (!name) return;
   const exercises = escapeNewlines($("plan-exercises").value);
   state.plans.push({ id: uid(), name, exercises });
+  const plan = state.plans[state.plans.length - 1];
+  plan.type = "strength";
+  plan.sets = Number($("plan-sets").value) || 3;
+  plan.reps = Number($("plan-reps").value) || 10;
+  plan.restSeconds = Number($("plan-rest").value) || 90;
+  const planExercises = exercises.length ? exercises : [name];
+  plan.exerciseWeights = planExercises.map(() => $("plan-weight").value === "" ? "" : Number($("plan-weight").value));
+  plan.exerciseHoldSeconds = [];
   $("plan-form").reset();
+  $("plan-sets").value = "3";
+  $("plan-reps").value = "10";
+  $("plan-rest").value = "90";
   saveState(); renderAll();
 });
 
@@ -796,8 +833,19 @@ $("mobility-plan-form").addEventListener("submit", event => {
     alert("Bitte gib einen Namen und mindestens eine Mobilitätsübung ein.");
     return;
   }
-  state.plans.push({ id: uid(), name, exercises, type: "mobility" });
+  state.plans.push({
+    id: uid(), name, exercises, type: "mobility",
+    sets: Number($("mobility-plan-sets").value) || 2,
+    reps: Number($("mobility-plan-reps").value) || 8,
+    restSeconds: Number($("mobility-plan-rest").value) || 30,
+    exerciseWeights: [],
+    exerciseHoldSeconds: exercises.map(() => Number($("mobility-plan-hold").value) || 0)
+  });
   $("mobility-plan-form").reset();
+  $("mobility-plan-sets").value = "2";
+  $("mobility-plan-reps").value = "8";
+  $("mobility-plan-rest").value = "30";
+  $("mobility-plan-hold").value = "30";
   saveState(); renderAll();
 });
 
@@ -1006,22 +1054,38 @@ function playStartSound() {
 
 function startLiveWorkout(plan) {
   stopTimer();
-  const restSeconds = Math.max(1, Math.min(3600, Number($("timer-seconds").value) || 90));
   const exercises = Array.isArray(plan.exercises) ? plan.exercises.filter(Boolean) : [];
+  const workoutExercises = exercises.length ? [...exercises] : [plan.name];
   const isMobility = plan.type === "mobility";
+  const lastEntryFor = exercise => [...state.workouts]
+    .filter(entry => entry.exercise === exercise && (!isMobility || entry.type === "mobility"))
+    .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")))[0];
+  const exerciseWeights = workoutExercises.map((exercise, index) => {
+    if (Array.isArray(plan.exerciseWeights) && plan.exerciseWeights[index] !== undefined) return plan.exerciseWeights[index];
+    const previous = lastEntryFor(exercise);
+    return previous && previous.weight !== undefined ? previous.weight : $("weight").value;
+  });
+  const exerciseHoldSeconds = workoutExercises.map((exercise, index) => {
+    if (Array.isArray(plan.exerciseHoldSeconds) && plan.exerciseHoldSeconds[index] !== undefined) {
+      return Number(plan.exerciseHoldSeconds[index]) || 0;
+    }
+    const previous = lastEntryFor(exercise);
+    return previous ? Number(previous.holdSeconds) || 0 : Number($("mobility-plan-hold").value) || 0;
+  });
   liveWorkout = {
     name: plan.name,
+    planId: plan.id,
     type: isMobility ? "mobility" : "strength",
-    exercises: exercises.length ? [...exercises] : [plan.name],
+    exercises: workoutExercises,
     exerciseIndex: 0,
     completedSets: 0,
     completedReps: 0,
     completedSetsByExercise: [],
-    sets: Math.max(1, Math.min(100, Number($("sets").value) || 3)),
-    reps: Math.max(1, Math.min(1000, Number($("reps").value) || 10)),
-    exerciseWeights: isMobility ? [] : (exercises.length ? exercises : [plan.name]).map(() => $("weight").value),
-    exerciseHoldSeconds: isMobility ? exercises.map(() => 0) : [],
-    restSeconds,
+    sets: Math.max(1, Math.min(100, Number(plan.sets) || (isMobility ? 2 : 3))),
+    reps: Math.max(1, Math.min(1000, Number(plan.reps) || (isMobility ? 8 : 10))),
+    exerciseWeights: isMobility ? [] : exerciseWeights,
+    exerciseHoldSeconds: isMobility ? exerciseHoldSeconds : [],
+    restSeconds: Math.max(1, Math.min(3600, Number(plan.restSeconds) || (isMobility ? 30 : 90))),
     startedAt: Date.now(),
     restEndsAt: null,
     phase: "ready",
@@ -1034,7 +1098,7 @@ function startLiveWorkout(plan) {
   $("live-sets").value = liveWorkout.sets;
   $("live-reps").value = liveWorkout.reps;
   $("live-rest").value = liveWorkout.restSeconds;
-  $("live-hold").value = "0";
+  $("live-hold").value = liveWorkout.exerciseHoldSeconds[0] || 0;
   $("live-hold").closest(".field").hidden = !isMobility;
   $("live-workout").hidden = false;
   $("live-workout").setAttribute("aria-hidden", "false");
@@ -1157,6 +1221,77 @@ function releaseScreenWakeLock() {
   if (wakeLock) wakeLock.release();
 }
 
+function saveLivePlanDefaults() {
+  if (!liveWorkout) return;
+  const plan = state.plans.find(item => item.id === liveWorkout.planId);
+  if (!plan) return;
+  plan.sets = liveWorkout.sets;
+  plan.reps = liveWorkout.reps;
+  plan.restSeconds = liveWorkout.restSeconds;
+  if (liveWorkout.type === "mobility") {
+    plan.exerciseHoldSeconds = [...liveWorkout.exerciseHoldSeconds];
+  } else {
+    plan.exerciseWeights = [...liveWorkout.exerciseWeights];
+  }
+  saveState();
+}
+
+function openWorkoutEditor(workout) {
+  $("edit-workout-id").value = workout.id;
+  $("edit-workout-name").textContent = workout.exercise || "Training";
+  $("edit-workout-date").value = workout.date || today();
+  $("edit-workout-weight").value = workout.weight ?? "";
+  $("edit-workout-sets").value = Number(workout.sets) || 1;
+  $("edit-workout-reps").value = Number(workout.reps) || 1;
+  $("edit-workout-hold").value = Number(workout.holdSeconds) || 0;
+  $("edit-workout-weight").closest(".field").hidden = workout.type === "mobility";
+  $("edit-workout-hold").closest(".field").hidden = workout.type !== "mobility";
+  $("edit-workout-dialog").showModal();
+}
+
+function updatePlanFromEditedWorkout(workout) {
+  const plans = workout.planId
+    ? state.plans.filter(plan => plan.id === workout.planId)
+    : state.plans.filter(plan => plan.type === (workout.type === "mobility" ? "mobility" : "strength") &&
+      (plan.exercises || []).includes(workout.exercise));
+  for (const plan of plans) {
+    plan.sets = workout.sets;
+    plan.reps = workout.reps;
+    const index = (plan.exercises || []).indexOf(workout.exercise);
+    if (index < 0) continue;
+    if (workout.type === "mobility") {
+      if (!Array.isArray(plan.exerciseHoldSeconds)) plan.exerciseHoldSeconds = [];
+      plan.exerciseHoldSeconds[index] = Number(workout.holdSeconds) || 0;
+    } else {
+      if (!Array.isArray(plan.exerciseWeights)) plan.exerciseWeights = [];
+      plan.exerciseWeights[index] = workout.weight === "" ? "" : Number(workout.weight);
+    }
+  }
+}
+
+$("edit-workout-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const workout = state.workouts.find(item => item.id === $("edit-workout-id").value);
+  if (!workout) {
+    $("edit-workout-dialog").close();
+    return;
+  }
+  workout.date = $("edit-workout-date").value;
+  workout.sets = Number($("edit-workout-sets").value);
+  workout.reps = Number($("edit-workout-reps").value);
+  if (workout.type === "mobility") {
+    workout.holdSeconds = Number($("edit-workout-hold").value) || 0;
+  } else {
+    workout.weight = $("edit-workout-weight").value === "" ? "" : Number($("edit-workout-weight").value);
+  }
+  updatePlanFromEditedWorkout(workout);
+  saveState();
+  renderAll();
+  $("edit-workout-dialog").close();
+});
+
+$("edit-workout-cancel").addEventListener("click", () => $("edit-workout-dialog").close());
+
 function endLiveWorkout() {
   if (!liveWorkout) return;
   const setsByExercise = [...liveWorkout.completedSetsByExercise];
@@ -1175,7 +1310,7 @@ function endLiveWorkout() {
       if (!sets) return;
       const weight = liveWorkout.exerciseWeights[index] || "";
       state.workouts.push({
-        id: uid(), sessionId, exercise, type: liveWorkout.type, minutes: minutesAssigned ? 0 : minutes,
+        id: uid(), sessionId, planId: liveWorkout.planId, exercise, type: liveWorkout.type, minutes: minutesAssigned ? 0 : minutes,
         intensity: $("intensity").value, weight: weight === "" ? "" : Number(weight),
         sets, reps: liveWorkout.reps, holdSeconds: liveWorkout.exerciseHoldSeconds[index] || 0, date: today()
       });
@@ -1260,17 +1395,20 @@ $("live-skip-rest").addEventListener("click", () => {
 $("live-weight").addEventListener("input", () => {
   if (liveWorkout) liveWorkout.exerciseWeights[liveWorkout.exerciseIndex] = $("live-weight").value;
 });
+$("live-weight").addEventListener("change", saveLivePlanDefaults);
 $("live-sets").addEventListener("change", () => {
   if (!liveWorkout) return;
   const minimum = liveWorkout.completedSets + (liveWorkout.restEndsAt === null ? 1 : 0);
   liveWorkout.sets = Math.max(minimum, Math.min(100, Number($("live-sets").value) || minimum));
   $("live-sets").value = liveWorkout.sets;
+  saveLivePlanDefaults();
   renderLiveWorkout();
 });
 $("live-reps").addEventListener("change", () => {
   if (!liveWorkout) return;
   liveWorkout.reps = Math.max(1, Math.min(1000, Number($("live-reps").value) || 1));
   $("live-reps").value = liveWorkout.reps;
+  saveLivePlanDefaults();
   renderLiveWorkout();
 });
 $("live-rest").addEventListener("change", () => {
@@ -1278,6 +1416,7 @@ $("live-rest").addEventListener("change", () => {
   liveWorkout.restSeconds = Math.max(1, Math.min(3600, Number($("live-rest").value) || 90));
   $("live-rest").value = liveWorkout.restSeconds;
   $("timer-seconds").value = liveWorkout.restSeconds;
+  saveLivePlanDefaults();
   if (liveWorkout.restEndsAt !== null) {
     liveWorkout.restEndsAt = Date.now() + liveWorkout.restSeconds * 1000;
   }
@@ -1288,6 +1427,7 @@ $("live-hold").addEventListener("change", () => {
   const holdSeconds = Math.max(0, Math.min(3600, Number($("live-hold").value) || 0));
   liveWorkout.exerciseHoldSeconds[liveWorkout.exerciseIndex] = holdSeconds;
   $("live-hold").value = holdSeconds;
+  saveLivePlanDefaults();
 });
 $("weight-trend-exercise").addEventListener("change", renderTrainingTrends);
 $("run-trend-metric").addEventListener("change", renderTrainingTrends);
