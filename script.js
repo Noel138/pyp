@@ -1125,7 +1125,7 @@ function renderLiveWorkout() {
   $("live-set-progress").textContent = workout.complete
     ? `${workout.completedSetsByExercise.reduce((sum, sets) => sum + sets, 0)} Sätze abgeschlossen`
     : isMobility
-      ? `Satz ${Math.min(workout.completedSets + 1, workout.sets)} von ${workout.sets} · Wiederholung ${Math.min(workout.completedReps + 1, workout.reps)} von ${workout.reps}`
+      ? `Satz ${Math.min(workout.completedSets + 1, workout.sets)} von ${workout.sets}${workout.exerciseHoldSeconds[workout.exerciseIndex] > 0 ? ` · Halten ${Math.min(workout.completedReps, workout.reps)} von ${workout.reps}` : ` · ${workout.reps} Wiederholungen`}`
       : `Satz ${Math.min(workout.completedSets + 1, workout.sets)} von ${workout.sets} · ${workout.reps} Wiederholungen`;
   $("live-timer-display").textContent = workout.complete
     ? "Fertig"
@@ -1136,11 +1136,13 @@ function renderLiveWorkout() {
     ? "Dein Training ist abgeschlossen. Beende die Einheit, um sie zu speichern."
     : isResting ? "Pause läuft …"
       : isHolding ? "Halte die Position …"
-        : isMobility ? "Bereit für die nächste Wiederholung."
+        : isMobility ? workout.exerciseHoldSeconds[workout.exerciseIndex] > 0
+          ? "Bereit für die nächste Halte-Wiederholung."
+          : "Führe den Satz aus und bestätige ihn danach."
           : "Bereit für deinen nächsten Satz.";
   $("live-set-done").textContent = workout.complete ? "Einheit speichern & beenden"
     : isMobility ? isHolding ? "Haltezeit läuft …"
-      : workout.exerciseHoldSeconds[workout.exerciseIndex] > 0 ? "Haltezeit starten" : "Wiederholung abschließen"
+      : workout.exerciseHoldSeconds[workout.exerciseIndex] > 0 ? "Haltezeit starten" : "Satz abschließen"
       : "Satz abschließen";
   $("live-set-done").disabled = isResting || isHolding;
   $("live-skip-rest").textContent = isHolding ? "Halten überspringen" : "Pause überspringen";
@@ -1164,6 +1166,8 @@ function finishLiveRest() {
       $("live-weight").value = liveWorkout.exerciseWeights[liveWorkout.exerciseIndex] || "";
       $("live-hold").value = liveWorkout.exerciseHoldSeconds[liveWorkout.exerciseIndex] || 0;
     }
+  } else if (liveWorkout.type === "mobility") {
+    liveWorkout.completedReps = 0;
   }
   renderLiveWorkout();
   notifyWorkoutRestFinished();
@@ -1345,21 +1349,18 @@ function completeMobilityRep() {
   liveWorkout.restEndsAt = null;
   liveWorkout.completedReps++;
   if (liveWorkout.completedReps >= liveWorkout.reps) {
-    liveWorkout.completedReps = 0;
     liveWorkout.completedSets++;
-    if (liveWorkout.completedSets >= liveWorkout.sets) {
-      liveWorkout.completedSetsByExercise[liveWorkout.exerciseIndex] = liveWorkout.completedSets;
-      if (liveWorkout.exerciseIndex + 1 >= liveWorkout.exercises.length) {
-        liveWorkout.complete = true;
-        renderLiveWorkout();
-        playTone(784);
-        return;
-      }
-    }
     startLiveTimer("rest", liveWorkout.restSeconds);
     return;
   }
   renderLiveWorkout();
+}
+
+function completeMobilitySet() {
+  if (!liveWorkout || liveWorkout.type !== "mobility" || liveWorkout.complete || liveWorkout.phase !== "ready") return;
+  liveWorkout.completedSets++;
+  liveWorkout.completedReps = 0;
+  startLiveTimer("rest", liveWorkout.restSeconds);
 }
 
 function startLiveTimer(phase, seconds) {
@@ -1385,7 +1386,7 @@ $("live-set-done").addEventListener("click", () => {
     if (liveWorkout.phase === "hold") return;
     const holdSeconds = liveWorkout.exerciseHoldSeconds[liveWorkout.exerciseIndex] || 0;
     if (holdSeconds > 0) startLiveTimer("hold", holdSeconds);
-    else completeMobilityRep();
+    else completeMobilitySet();
   } else completeLiveSet();
 });
 $("live-skip-rest").addEventListener("click", () => {
