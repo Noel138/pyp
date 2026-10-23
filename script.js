@@ -285,17 +285,24 @@ function planSettingsLabel(plan) {
   const reps = Number(plan.reps) || (plan.type === "mobility" ? 8 : 10);
   const rest = Number(plan.restSeconds) || (plan.type === "mobility" ? 30 : 90);
   const exercises = Array.isArray(plan.exercises) && plan.exercises.length ? plan.exercises : [plan.name];
+  const exerciseReps = exercises.map((exercise, index) => ({
+    exercise,
+    reps: Number(plan.exerciseReps?.[index]) || reps
+  }));
+  const repsLabel = exerciseReps.every(item => item.reps === exerciseReps[0].reps)
+    ? `${exerciseReps[0].reps} Wdh.`
+    : exerciseReps.map(item => `${esc(item.exercise)} ${item.reps} Wdh.`).join(" · ");
   if (plan.type === "mobility") {
     const holds = exercises.map((exercise, index) =>
       `${esc(exercise)} ${Math.max(0, Number(plan.exerciseHoldSeconds?.[index]) || 0)} Sek.`
     ).join(" · ");
-    return `${sets} Sätze · ${reps} Wdh. · Pause ${rest} Sek. · Halten: ${holds}`;
+    return `${sets} Sätze · ${repsLabel} · Pause ${rest} Sek. · Halten: ${holds}`;
   }
   const weights = exercises.map((exercise, index) => {
     const weight = plan.exerciseWeights?.[index];
     return Number(weight) > 0 ? `${esc(exercise)} ${esc(weight)} kg` : "";
   }).filter(Boolean);
-  return `${sets} Sätze · ${reps} Wdh. · Pause ${rest} Sek.${weights.length ? ` · ${weights.join(" · ")}` : ""}`;
+  return `${sets} Sätze · ${repsLabel} · Pause ${rest} Sek.${weights.length ? ` · ${weights.join(" · ")}` : ""}`;
 }
 
 function renderPlans() {
@@ -817,6 +824,7 @@ $("plan-form").addEventListener("submit", event => {
   plan.restSeconds = Number($("plan-rest").value) || 90;
   const planExercises = exercises.length ? exercises : [name];
   plan.exerciseWeights = planExercises.map(() => $("plan-weight").value === "" ? "" : Number($("plan-weight").value));
+  plan.exerciseReps = planExercises.map(() => plan.reps);
   plan.exerciseHoldSeconds = [];
   $("plan-form").reset();
   $("plan-sets").value = "3";
@@ -839,6 +847,7 @@ $("mobility-plan-form").addEventListener("submit", event => {
     reps: Number($("mobility-plan-reps").value) || 8,
     restSeconds: Number($("mobility-plan-rest").value) || 30,
     exerciseWeights: [],
+    exerciseReps: exercises.map(() => Number($("mobility-plan-reps").value) || 8),
     exerciseHoldSeconds: exercises.map(() => Number($("mobility-plan-hold").value) || 0)
   });
   $("mobility-plan-form").reset();
@@ -1058,7 +1067,7 @@ function startLiveWorkout(plan) {
   const workoutExercises = exercises.length ? [...exercises] : [plan.name];
   const isMobility = plan.type === "mobility";
   const lastEntryFor = exercise => [...state.workouts]
-    .filter(entry => entry.exercise === exercise && (!isMobility || entry.type === "mobility"))
+    .filter(entry => entry.exercise === exercise && (isMobility ? entry.type === "mobility" : entry.type !== "mobility"))
     .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")))[0];
   const exerciseWeights = workoutExercises.map((exercise, index) => {
     if (Array.isArray(plan.exerciseWeights) && plan.exerciseWeights[index] !== undefined) return plan.exerciseWeights[index];
@@ -1072,6 +1081,13 @@ function startLiveWorkout(plan) {
     const previous = lastEntryFor(exercise);
     return previous ? Number(previous.holdSeconds) || 0 : Number($("mobility-plan-hold").value) || 0;
   });
+  const exerciseReps = workoutExercises.map((exercise, index) => {
+    if (Array.isArray(plan.exerciseReps) && plan.exerciseReps[index] !== undefined) {
+      return Math.max(1, Math.min(1000, Number(plan.exerciseReps[index]) || 1));
+    }
+    const previous = lastEntryFor(exercise);
+    return Math.max(1, Math.min(1000, Number(previous?.reps) || Number(plan.reps) || (isMobility ? 8 : 10)));
+  });
   liveWorkout = {
     name: plan.name,
     planId: plan.id,
@@ -1082,7 +1098,8 @@ function startLiveWorkout(plan) {
     completedReps: 0,
     completedSetsByExercise: [],
     sets: Math.max(1, Math.min(100, Number(plan.sets) || (isMobility ? 2 : 3))),
-    reps: Math.max(1, Math.min(1000, Number(plan.reps) || (isMobility ? 8 : 10))),
+    reps: exerciseReps[0],
+    exerciseReps,
     exerciseWeights: isMobility ? [] : exerciseWeights,
     exerciseHoldSeconds: isMobility ? exerciseHoldSeconds : [],
     restSeconds: Math.max(1, Math.min(3600, Number(plan.restSeconds) || (isMobility ? 30 : 90))),
@@ -1163,6 +1180,8 @@ function finishLiveRest() {
       liveWorkout.exerciseIndex++;
       liveWorkout.completedSets = 0;
       liveWorkout.completedReps = 0;
+      liveWorkout.reps = liveWorkout.exerciseReps[liveWorkout.exerciseIndex];
+      $("live-reps").value = liveWorkout.reps;
       $("live-weight").value = liveWorkout.exerciseWeights[liveWorkout.exerciseIndex] || "";
       $("live-hold").value = liveWorkout.exerciseHoldSeconds[liveWorkout.exerciseIndex] || 0;
     }
@@ -1230,7 +1249,8 @@ function saveLivePlanDefaults() {
   const plan = state.plans.find(item => item.id === liveWorkout.planId);
   if (!plan) return;
   plan.sets = liveWorkout.sets;
-  plan.reps = liveWorkout.reps;
+  plan.reps = liveWorkout.exerciseReps[0];
+  plan.exerciseReps = [...liveWorkout.exerciseReps];
   plan.restSeconds = liveWorkout.restSeconds;
   if (liveWorkout.type === "mobility") {
     plan.exerciseHoldSeconds = [...liveWorkout.exerciseHoldSeconds];
@@ -1260,9 +1280,11 @@ function updatePlanFromEditedWorkout(workout) {
       (plan.exercises || []).includes(workout.exercise));
   for (const plan of plans) {
     plan.sets = workout.sets;
-    plan.reps = workout.reps;
     const index = (plan.exercises || []).indexOf(workout.exercise);
     if (index < 0) continue;
+    if (!Array.isArray(plan.exerciseReps)) plan.exerciseReps = [];
+    plan.exerciseReps[index] = workout.reps;
+    plan.reps = plan.exerciseReps[0] || workout.reps;
     if (workout.type === "mobility") {
       if (!Array.isArray(plan.exerciseHoldSeconds)) plan.exerciseHoldSeconds = [];
       plan.exerciseHoldSeconds[index] = Number(workout.holdSeconds) || 0;
@@ -1316,7 +1338,7 @@ function endLiveWorkout() {
       state.workouts.push({
         id: uid(), sessionId, planId: liveWorkout.planId, exercise, type: liveWorkout.type, minutes: minutesAssigned ? 0 : minutes,
         intensity: $("intensity").value, weight: weight === "" ? "" : Number(weight),
-        sets, reps: liveWorkout.reps, holdSeconds: liveWorkout.exerciseHoldSeconds[index] || 0, date: today()
+        sets, reps: liveWorkout.exerciseReps[index], holdSeconds: liveWorkout.exerciseHoldSeconds[index] || 0, date: today()
       });
       minutesAssigned = true;
     });
@@ -1408,6 +1430,7 @@ $("live-sets").addEventListener("change", () => {
 $("live-reps").addEventListener("change", () => {
   if (!liveWorkout) return;
   liveWorkout.reps = Math.max(1, Math.min(1000, Number($("live-reps").value) || 1));
+  liveWorkout.exerciseReps[liveWorkout.exerciseIndex] = liveWorkout.reps;
   $("live-reps").value = liveWorkout.reps;
   saveLivePlanDefaults();
   renderLiveWorkout();

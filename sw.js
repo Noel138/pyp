@@ -1,4 +1,4 @@
-const CACHE_NAME = "pyp-app-v6";
+const CACHE_NAME = "pyp-app-v7";
 const APP_FILES = [
   "./",
   "./index.html",
